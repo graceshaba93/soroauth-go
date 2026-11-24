@@ -111,6 +111,12 @@ this project adheres to
 
 ### Changed
 
+- `soroauth explain-error` now exits 1 when the entry decodes but cannot be
+  inspected (for example, a muxed credential address), in text mode as well as
+  with `--json`. Text mode used to print the error and exit 0, and the `--json`
+  exit 1 was undocumented; the code is now listed in `explain-error -h`. Found
+  by the new test that holds every documented exit code to the implementation.
+  (#669)
 - **C shared-library ABI** (`bindings/c`) builds the signing core as a
   `c-shared` library and exposes the authorization operations and typed errors
   through a JSON-based C interface. (#339)
