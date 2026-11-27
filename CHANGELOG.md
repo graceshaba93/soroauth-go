@@ -17,6 +17,175 @@ this project adheres to
   and each binary matches the architecture its directory names. Installing on a
   platform without a prebuild still falls back to the source build, and CI
   exercises that fallback as well as the prebuild path.
+- `HostRules` enumerates every rule the Soroban host enforces on an
+  authorization entry, each with its `rs-soroban-env` source citation, and marks
+  the rules that cannot be checked offline with the reason instead of omitting
+  them. `ValidateEntry` checks every offline rule in one place — delegate order
+  and uniqueness, delegate depth, value depth, map key order in the host's value
+  order (not XDR byte order), value and symbol form, address types, the classic
+  multisig vector, and create-contract authorization — and reports a violation
+  as a `*HostRuleError` that matches the new `ErrHostRuleViolation`.
+  `AuthorizeEntry` and `StreamingSign` run it before any signer is called and
+  again on the signed result. [docs/host-rules.md](docs/host-rules.md) is the
+  documented copy, and a test fails if it and the code disagree. (#623)
+- The delegate tree depth limit is established from the host source and
+  enforced: the host reads a delegate at depth k only when k + 1 +
+  depth(signature) <= 100 (98 levels with Void signatures, 96 with ed25519), and
+  soroauth applies one policy, `MaxDelegateDepth = 54`, the deepest fully signed
+  tree its own bounded decoder can read back. `WithDelegates`, `ValidateEntry`,
+  `AuthorizeEntry` and `StreamingSign` refuse a deeper tree with the new
+  `ErrDelegateDepthLimit` before signing. The host has no breadth limit; the
+  per-delegate resource cost is measured and documented instead.
+  `testdata/host-probe` (`make host-probe`) measures every boundary against the
+  real soroban-env-host 30.0.1, and e2e scenarios S, S-host and S-over confirm
+  them on testnet. (#622)
+
+- Add five AST-based repository invariant linters (`NoPanic`, `NoLogging`,
+  `NoMathRand`, `NoFloats`, `NoMutation`) in `internal/invariants`, each with
+  violating and compliant test fixtures and an exemption directive
+  (`// invariant-allow: <rule> <reason>`). A root-level test runs all analyzers
+  across the full repo tree. (#627)
+
+- Load custom risk rules from JSON or YAML configuration via `LoadRiskRules`,
+  evaluated alongside built-in heuristics. Four rule types are supported:
+  `contract_allowlist`, `function_allowlist`, `max_amount` and
+  `forbidden_sac_admin`. Malformed rules fail at load time naming the offending
+  rule, and configured rules cannot suppress built-in findings. (#626)
+
+- Add `VerifyInvocationTree` to compare the library's invocation tree against
+  the host's reported tree structurally. A divergence reports the exact path
+  where the trees differ. Comparison covers function type, contract address,
+  function name, arguments and sub-invocations recursively at arbitrary depth.
+  (#625)
+
+- Audit every address-handling site for muxed account behaviour. Muxed addresses
+  in invocation arguments are now reported in full (`M…` strkey) via
+  `FormatArgumentAddress` and `FormatScVal`, never truncated to the underlying
+  account. The canonical JSON encoder/decoder round-trips the `muxed_account`
+  type, and credentials still refuse muxed addresses unchanged. (#624)
+
+- `examples/opentelemetry` traces the whole `rpcflow.SignAndSubmit` flow as one
+  OpenTelemetry trace: record pass, signing, enforcing pass, submission and
+  polling, with the two passes' resource fees and their difference as
+  attributes. It wraps `rpcflow.Client` and each `soroauth.Signer` rather than
+  forking the flow, lives in its own module so OpenTelemetry never enters the
+  root `go.mod`, ships `cmd/trace-transfer` for testnet with a real captured
+  trace in its README, and asserts that no span carries a secret, an entry or a
+  signature. (#422)
+- Add a per-caller token-bucket rate limit to the verification service, checked
+  before the body is read and before a concurrency slot is taken. A refusal is
+  `429` with `Retry-After`; `AUTH_TOKEN` accepts a comma-separated list so
+  distinct clients get distinct quotas, and a new limit-rejection metric splits
+  sheds by rate, concurrency and body. (#549)
+
+- Run the OpenAPI conformance check on pull requests when its inputs change, and
+  prove the check rejects an extra field, a renamed field, an undeclared status
+  and the wrong body shape rather than only passing on a correct response.
+  (#552)
+
+- Add an offline browser signing page whose assets are all local: it derives the
+  payload in the WASM core, signs with a passkey, verifies the assertion
+  locally, builds the signature ScVal with a new wasm binding, and makes no
+  request after load. A Playwright test aborts and records every request after
+  load so a CDN import or font fetch fails the run. (#557)
+
+- Add a Helm chart and plain Kubernetes manifests for the verification service.
+  The chart runs the server from the published image, uses `/healthz` for all
+  probes, separates metrics onto their own Service, and refuses to render
+  without an existing token Secret. CI lints and validates both, then deploys
+  the chart in kind and verifies a golden vector through the service. (#560)
+
+- Make the WebAssembly signing core reproducible: both targets are built with
+  `-trimpath -buildvcs=false`, `scripts/reproduce-wasm.sh` rebuilds a tag twice
+  and writes `soroauth-wasm-checksums.txt`, and the release and npm package
+  publish that digest. A `reproduce-wasm` CI job rebuilds the published tag and
+  fails on any difference. (#558)
+
+- Add a WASI build of the signing core (`cmd/soroauthwasi`, `GOOS=wasip1`) that
+  speaks one JSON request over stdin and one response over stdout, needs no
+  JavaScript host, and replays the golden vectors under Node's WASI runtime.
+  Both wasm targets share `internal/wasmcore`. (#565)
+
+- Extend the composite action with `envelope` and `envelope-file` inputs, which
+  report every authorization entry by operation, index and address in the job
+  summary, plus a `fail-on` input for envelope-wide verdict conditions. (#559)
+
+- Add the mixed-arm e2e scenario: one transaction carries source-account,
+  legacy, V2 and delegates entries, and a negative control removes the V2
+  signature and requires the host to refuse it. The `modular-account` fixture
+  gains a `require_all` entry point for it. (#566)
+
+- Publish the Python binding to PyPI on each `v*` tag: a per-platform wheel
+  matrix (linux-x86\_64, linux-aarch64, darwin-x86\_64, darwin-aarch64) bundles
+  the `libsoroauth` native library, auditwheel / delocate repair satisfies the
+  manylinux and macOS policies, and PyPI trusted publishing (OIDC) replaces any
+  long-lived token. A golden-vector smoke test runs before and after publish.
+  (#540)
+
+- Add PEP 561 `py.typed` marker and `__init__.pyi` stubs to the Python binding:
+  all public symbols, exception classes, and result types are typed, a mypy
+  harness in `bindings/python/typecheck/` verifies the stubs, and
+  `ci-python.yml` runs `mypy --strict` on every push to `main`. (#541)
+
+- Publish the JVM binding to Maven Central on each `v*` tag: the pom now carries
+  all required Central metadata (licenses, developers, scm, issueManagement), a
+  `release` profile adds sources, Javadoc, and GPG signatures via the new
+  Central Portal (`central-publishing-maven-plugin`), a four-platform native
+  matrix builds and bundles `libsoroauth`, and a cross-platform consumer smoke
+  test resolves the published artifact from `repo1.maven.org` and replays all
+  golden vectors. (#544)
+
+- Document the C ABI threading contract in `bindings/c/THREADING.md`: every
+  exported symbol is concurrency-safe with no initialisation call and no
+  library-wide lock; the caller owns every returned `char *` and must call
+  `SoroauthFree` exactly once. `TestABIThreadingContract` proves the contract on
+  the Go side with `GOMAXPROCS*4` goroutines running 24 iterations each under
+  `go test -race`. (#547)
+
+- Expose `Version` constant in the root package and document it in package docs,
+  ensuring programmatic access to the library version and aligning CLI defaults
+  with the library version. (#676)
+
+- Report the exact `soroauth` build identity (tag, commit, build timestamp, Go
+  version) in the composite GitHub Action outputs (`version`) and job summary
+  (`$GITHUB_STEP_SUMMARY`), with tests and reproducible pinning documentation.
+  (#678)
+
+- Assert structured platform support documentation in each binding README across
+  supported operating systems and architectures. (#670)
+
+- Assert help lines for every public `.PHONY` target and establish documented
+  conventions for internal targets. (#672)
+
+- Add a FROST distributed key generation ceremony in `frost/dkg.go`: every
+  participant contributes a VSS commitment and proof of knowledge, verifies
+  every peer's contributions, and finishes with exactly the `DKGShare` the FROST
+  signer consumes. No participant or coordinator ever holds the full key.
+  `DKGTranscript` is the public, independently verifiable record of the
+  ceremony; a participant that aborts or sends a malformed contribution is named
+  in a `*DKGError` and the ceremony fails closed. (#569)
+
+- Add proactive share refresh in `frost/refresh.go`: every participant
+  contributes a zero-constant-term polynomial, so the group verification key and
+  account address are unchanged while every secret share and public key share
+  moves to a new epoch. Old shares cannot be combined with refreshed ones to
+  sign, a missed refresh is named, and a contribution that fails `vss_verify` or
+  changes the constant term is refused. (#570)
+
+- Add signed session transcripts: `SessionTranscript`, `TranscriptRecorder` and
+  `VerifyTranscript`, attached to a `Coordinator` with `WithSessionTranscript`.
+  Every session records its participants, payload hash, rounds, outcome and
+  audit records; failed and aborted sessions record their reason. The
+  coordinator signs the transcript once with Ed25519 and the public key travels
+  inside it, so verification needs no coordinator cooperation. A transcript
+  carries no key share, seed, nonce or signature value. (#572)
+
+- Add `POST /risk` to the verification service and the OpenAPI document: it
+  returns the structural analyzer's findings with their exported, stable `code`s
+  and severities, under the same authentication and concurrency bound as
+  `/verify`. Every report carries the analyzer's note that findings are
+  heuristics, not a safety guarantee. The finding identifiers are now exported
+  as `FindingCode*` constants. (#564)
 
 - Add a structured audit record for every signing decision: `AuditRecord` and
   the `AuditSink` interface, attached with the `WithAudit` option. A record is
@@ -34,6 +203,12 @@ this project adheres to
 
 ### Fixed
 
+- The `delegates_chain_depth_57` golden vector claimed to be the deepest
+  delegate nesting the library accepts end to end, but soroauth signed that
+  chain and then refused to decode its own output: signing the leaf adds three
+  levels of XDR nesting. The vector is regenerated at depth 54
+  (`delegates_chain_depth_54`), the deepest signed chain that decodes, and a
+  test decodes its signed entry. No emitted bytes change. (#622)
 - Document the intermittent macOS crash in the Node binding under `node:test` in
   `bindings/node/README.md`: Go's cgo entry reuses the g0 stack bounds recorded
   on an earlier entry, so being re-entered on another thread trips
@@ -111,6 +286,15 @@ this project adheres to
 
 ### Changed
 
+- `AuthorizeEntry` and `StreamingSign` now refuse, with `ErrHostRuleViolation`,
+  an entry or a signature the host would refuse for its ordering or canonical
+  form — including a signature on a classic `G…` node that is not the account
+  signature vector, which the host cannot accept. `WithDelegates` refuses a tree
+  deeper than `MaxDelegateDepth` (54) rather than 64; that refusal still matches
+  `ErrDecodeLimit`. `ValidateDelegateOrder` errors are now `*HostRuleError`s
+  with unchanged messages. The CLI reports the new sentinels as
+  `delegate_depth_limit` and `host_rule_violation` and exits with the
+  signing-refusal code. (#622, #623)
 - `soroauth explain-error` now exits 1 when the entry decodes but cannot be
   inspected (for example, a muxed credential address), in text mode as well as
   with `--json`. Text mode used to print the error and exit 0, and the `--json`
